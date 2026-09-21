@@ -214,6 +214,7 @@ table.data.inner tbody tr:nth-child(even){background:transparent}
 .dir-item:hover{border-color:var(--teal-l);background:var(--teal-wash)}
 .dir-badge{font-size:10px;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--red);border-radius:5px;padding:3px 7px;flex-shrink:0}
 .dir-item.faixa .dir-badge{background:var(--teal-d)}
+.dir-item.dimensao .dir-badge{background:#a9772f}
 .dir-ro{font-weight:700;color:var(--ink);font-size:13px}
 .dir-txt{color:var(--ink-soft);font-size:12.5px;flex:1}
 .dir-go{color:var(--teal-d);font-weight:700;font-size:12px;flex-shrink:0}
@@ -307,6 +308,15 @@ function titleCasePt(s){
 }
 const EQUIP_MAP = {van15:'Van15',van20:'Van20',micro:'Micro','ônibus':'Ônibus',onibus:'Ônibus',onibu:'Ônibus'};
 function cleanEquip(s){ if(s==null||s==='') return null; const k=norm(s).trim(); return EQUIP_MAP[k]|| s.toString().trim(); }
+// dimensionamento: equipamento esperado a partir do nº de pessoas cadastradas
+function expectedEquip(n){
+  if(n==null||isNaN(n)) return null;
+  if(n<=13) return 'Van15';
+  if(n<=18) return 'Van20';
+  if(n<=28) return 'Micro';
+  return 'Ônibus';
+}
+const hasPax = recs => recs.some(r=>r.pessoasCad!=null);
 const fmt = n => (n==null||isNaN(n))?'—':n.toLocaleString('pt-BR',{maximumFractionDigits:1});
 const fmt0 = n => (n==null||isNaN(n))?'—':Math.round(n).toLocaleString('pt-BR');
 const isErr = v => v!=null && /#|div\/0|ref!|n\/a|valor!|erro/i.test(v.toString());
@@ -322,6 +332,13 @@ function routeFaixaStats(recs){
   const pendentes=recs.filter(r=>r.pendente).length;
   const diasPend=[...new Set(recs.filter(r=>r.pendente&&r.day!=null).map(r=>r.day))].sort((a,b)=>a-b);
   return {byRoute, changed, errRoutes, pendentes, diasPend};
+}
+function routeDimStats(recs){
+  const byRoute={};
+  recs.forEach(r=>{ if(!r.roteiro||r.pessoasCad==null||!r.eqSol) return;
+    const b=(byRoute[r.roteiro]=byRoute[r.roteiro]||{div:0});
+    if(r.dimDiv) b.div++; });
+  return byRoute;
 }
 function frotaVaries(recs){
   const eq=new Set(); let div=false;
@@ -385,6 +402,7 @@ function buildRecords(headers, rows){
     placa: find('placa'),
     motivo: H.findIndex(h=> norm(h).includes('motivo')),
     pax: H.findIndex(h=> norm(h).includes('transportadas')),
+    pessoasCad: H.findIndex(h=> norm(h).includes('cadastradas')),
     empresa: H.findIndex(h=> norm(h)==='empresa'),
   };
   const horas = H.map((h,i)=> norm(h).startsWith('horario')? i : -1).filter(i=>i>=0);
@@ -415,11 +433,15 @@ function buildRecords(headers, rows){
       h2: idx.h2>=0? parseTime(r[idx.h2]) : null,
       motivo: idx.motivo>=0 && r[idx.motivo]!=null && r[idx.motivo].toString().trim()!=='' ? r[idx.motivo].toString().trim() : null,
       pax: idx.pax>=0? num(r[idx.pax]) : null,
+      pessoasCad: idx.pessoasCad>=0? num(r[idx.pessoasCad]) : null,
       empresa: idx.empresa>=0 && r[idx.empresa]!=null && r[idx.empresa].toString().trim()!=='' ? r[idx.empresa].toString().trim() : null,
     });
     const last=out[out.length-1];
     // lançamento ainda não preenchido: sem km em nenhuma das três colunas
     last.pendente = (last.km==null && last.kmIda==null && last.kmVolta==null);
+    // dimensionamento: equipamento solicitado x nº de pessoas cadastradas
+    last.dimEsp = expectedEquip(last.pessoasCad);
+    last.dimDiv = !!(last.eqSol && last.dimEsp && norm(last.eqSol)!==norm(last.dimEsp));
   }
   const res = out.filter(x=>x.date); // keep dated rows
   res.faixaLabel = idx.faixa>=0 ? (H[idx.faixa]||'Faixa') : null;
@@ -703,10 +725,10 @@ function renderServiceHTML(key){
     </div>
   </div>
   <div class="kpis" id="kpis"></div>
-${fx ? `
+${(fx||hasPax(all)) ? `
   <div class="card" id="dirCard">
     <h3>Direcionador · pontos para revisar <span class="tag">divergências de lançamento</span></h3>
-    <p class="sub">Roteiros onde a <b>faixa de km mudou</b> no mês, ou onde há <b>erro de cálculo</b>. Clique para abrir o roteiro na visão dia a dia.</p>
+    <p class="sub">Roteiros onde a <b>faixa de km mudou</b> no mês, há <b>erro de cálculo</b>, ou o <b>equipamento solicitado diverge do nº de pessoas cadastradas</b>. Clique para abrir o roteiro na visão dia a dia.</p>
     <div id="dirContent"></div>
   </div>` : ''}
 
@@ -776,7 +798,7 @@ function afterService(key){
   const fv=frotaVaries(STATE.records[key]||[]);
   renderKPIs(recs,fx,fv,key);
   renderDailyChart(recs,'chDaily');
-  if(fx) renderDirecionador(key,recs);
+  if(fx||hasPax(recs)) renderDirecionador(key,recs);
   if(key==='circ') renderCircularLines(recs);
   renderDupVehicles(recs);
   renderRouteDrill(key);
@@ -839,20 +861,25 @@ function corHex(c){const m={Azul:'#2f6fed',Vermelho:'#EA0029',Amarelo:'#f2b705',
 function renderDirecionador(key,recs){
   const el=document.getElementById('dirContent'); if(!el) return;
   const st=routeFaixaStats(recs);
+  const dimSt=routeDimStats(recs);
   const items=[];
   Object.entries(st.byRoute).forEach(([ro,b])=>{
     const bands=[...b.bands];
     if(bands.length>=2) items.push({ro,type:'faixa',txt:bands.join(' → ')});
     if(b.err) items.push({ro,type:'erro',txt:`${b.err} registro(s) com erro de cálculo`});
   });
+  Object.entries(dimSt).forEach(([ro,b])=>{
+    if(b.div>0) items.push({ro,type:'dimensao',txt:`${b.div} viagem(ns) com equipamento solicitado divergente do nº de pessoas cadastradas`});
+  });
   items.sort((a,b)=> a.type.localeCompare(b.type) || a.ro.localeCompare(b.ro));
   const aviso = st.pendentes
     ? `<div class="pend-note"><b>${fmt0(st.pendentes)}</b> lançamento(s) ainda sem preenchimento de km${st.diasPend.length?` · dia ${st.diasPend.join(', ')}`:''} — não entram na crítica.</div>`
     : '';
-  if(!items.length){ el.innerHTML=aviso+`<p style="color:var(--ink-soft);margin:4px 0">Nenhuma mudança de faixa ou erro de lançamento no filtro atual.</p>`; return; }
+  if(!items.length){ el.innerHTML=aviso+`<p style="color:var(--ink-soft);margin:4px 0">Nenhuma mudança de faixa, erro de lançamento ou divergência de dimensionamento no filtro atual.</p>`; return; }
+  const badgeTxt = t => t==='erro'?'ERRO':t==='dimensao'?'PESSOAS':'FAIXA';
   el.innerHTML=aviso+`<div class="dir-list">${items.map(it=>`
     <button class="dir-item ${it.type}" data-ro="${it.ro.replace(/"/g,'&quot;')}">
-      <span class="dir-badge">${it.type==='erro'?'ERRO':'FAIXA'}</span>
+      <span class="dir-badge">${badgeTxt(it.type)}</span>
       <span class="dir-ro">${it.ro}</span>
       <span class="dir-txt">${it.txt}</span>
       <span class="dir-go">abrir ›</span>
@@ -878,6 +905,7 @@ function renderRouteDrill(key){
 
   const rows=base.filter(r=>r.roteiro===f.route).sort((a,b)=> (a.date-b.date));
   const showFx=rows.some(r=>r.faixa);
+  const showPax=rows.some(r=>r.pessoasCad!=null);
   const fxLabel=(STATE.records[key]||{}).faixaLabel||'Faixa';
   // critique band changes chronologically
   let prevFaixa=null;
@@ -888,6 +916,7 @@ function renderRouteDrill(key){
   });
   const cidade=[...new Set(rows.map(r=>r.cidade))].join(', ');
   const troca=rows.filter(r=>r.eqSol&&r.eqUti&&norm(r.eqSol)!==norm(r.eqUti)).length;
+  const dimDivN=rows.filter(r=>r.dimDiv).length;
   const bands=[...new Set(rows.filter(r=>r.faixa&&!isErr(r.faixa)&&!r.pendente).map(r=>r.faixa))];
   const errCount=rows.filter(r=>r._fxErr).length;
   const pendCount=rows.filter(r=>r.pendente).length;
@@ -897,15 +926,17 @@ function renderRouteDrill(key){
   if(errCount) crit.push(`<span style="color:var(--red);font-weight:700">${errCount} erro(s) de cálculo</span>`);
   if(pendCount) crit.push(`<span style="color:var(--ink-soft)">${pendCount} dia(s) sem preenchimento</span>`);
   if(troca) crit.push(`${troca} dia(s) com troca de frota`);
+  if(dimDivN) crit.push(`<span style="color:#a9772f;font-weight:700">${dimDivN} solicitação(ões) divergente(s) do nº de pessoas</span>`);
   document.getElementById('routeSub').innerHTML=`${cidade?cidade+' · ':''}${rows.length} registro(s) no mês${crit.length?' · '+crit.join(' · '):''}`;
   const t=document.getElementById('routeTable');
   t.innerHTML=`<thead><tr>
     <th>Dia</th><th>Cliente pediu</th><th>Disponibilizamos</th>
     ${showFx?`<th>${fxLabel}</th>`:''}
+    ${showPax?`<th class="num">Nº pessoas</th>`:''}
     <th class="num">KM ida</th><th class="num">KM volta</th><th class="num">KM total</th></tr></thead>
   <tbody>${rows.map(r=>{
     const dtr=r.eqSol&&r.eqUti&&norm(r.eqSol)!==norm(r.eqUti);
-    const flag=dtr||r._fxChange||r._fxErr;
+    const flag=dtr||r._fxChange||r._fxErr||r.dimDiv;
     let fxCell='';
     if(showFx){
       let badge='';
@@ -914,11 +945,13 @@ function renderRouteDrill(key){
       else if(r._fxChange) badge=' <span class="divtag">mudou</span>';
       fxCell=`<td>${r.pendente?'—':(r.faixa||'—')}${badge}</td>`;
     }
+    const paxCell = showPax ? `<td class="num">${r.pessoasCad!=null?fmt0(r.pessoasCad):'—'}${r.dimDiv?` <span class="divtag" title="esperado: ${r.dimEsp}">dimensão</span>`:''}</td>` : '';
     return `<tr class="${flag?'rdiv':''} ${r.pendente?'rpend':''}">
       <td>${r.date?r.date.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}):'—'}</td>
       <td>${r.eqSol||'—'}</td>
       <td>${r.eqUti||'—'}${dtr?' <span class="divtag">troca</span>':''}</td>
       ${fxCell}
+      ${paxCell}
       <td class="num">${fmt(r.kmIda)}</td><td class="num">${fmt(r.kmVolta)}</td><td class="num">${fmt(r.km)}</td>
     </tr>`;}).join('')}</tbody>`;
 }
@@ -954,6 +987,10 @@ function renderKPIs(recs,fx,fv,key){
   if(key==='fixo') cards.push(['Linhas com equipamento diferente',fmt0(divLinhas),'',divLinhas>0,'truck']);
   else if(key==='extra'||key==='transf') cards.push(['Viagens com equipamento diferente',fmt(divViag),'',divViag>0,'truck']);
   else if(!fv){ const linhas=new Set(recs.map(r=>lineGroup(r.roteiro))).size; cards.push(['Linhas de cobrança',fmt0(linhas),'','','tag']); }
+  if(hasPax(recs)){
+    const dimN=recs.filter(r=>r.dimDiv).length;
+    cards.push(['Solicitação x nº de pessoas',fmt0(dimN),'',dimN>0,'users']);
+  }
   if(fx){
     const st=routeFaixaStats(recs);
     cards.push(['Roteiros com mudança de faixa',fmt0(st.changed),'',st.changed>0,'pin']);
@@ -981,6 +1018,7 @@ const KPI_ICON={
   calc:'<svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="8.01" y2="11"/><line x1="12" y1="11" x2="12.01" y2="11"/><line x1="16" y1="11" x2="16.01" y2="11"/><line x1="8" y1="15" x2="8.01" y2="15"/><line x1="12" y1="15" x2="12.01" y2="15"/></svg>',
   clock:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>',
   tag:'<svg viewBox="0 0 24 24"><path d="M4 4h8l8 8-8 8-8-8z"/><circle cx="8.5" cy="8.5" r="1.3"/></svg>',
+  users:'<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.6"/><path d="M15.2 14.3c2.6.4 4.6 2.6 4.8 5.7"/></svg>',
 };
 
 function renderDayStrip(key){
